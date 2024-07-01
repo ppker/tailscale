@@ -253,9 +253,14 @@ func (lc *LocalClient) sendWithHeaders(
 	}
 	if res.StatusCode != wantStatus {
 		err = fmt.Errorf("%v: %s", res.Status, bytes.TrimSpace(slurp))
-		return nil, nil, bestError(err, slurp)
+		return nil, nil, httpStatusError{bestError(err, slurp), res.StatusCode}
 	}
 	return slurp, res.Header, nil
+}
+
+type httpStatusError struct {
+	error
+	HTTPStatus int
 }
 
 func (lc *LocalClient) get200(ctx context.Context, path string) ([]byte, error) {
@@ -278,9 +283,50 @@ func decodeJSON[T any](b []byte) (ret T, err error) {
 }
 
 // WhoIs returns the owner of the remoteAddr, which must be an IP or IP:port.
+//
+// If not found, the error is ErrPeerNotFound.
+//
+// For connections proxied by tailscaled, this looks up the owner of the given
+// address as TCP first, falling back to UDP; if you want to only check a
+// specific address family, use WhoIsProto.
 func (lc *LocalClient) WhoIs(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error) {
 	body, err := lc.get200(ctx, "/localapi/v0/whois?addr="+url.QueryEscape(remoteAddr))
 	if err != nil {
+		if hs, ok := err.(httpStatusError); ok && hs.HTTPStatus == http.StatusNotFound {
+			return nil, ErrPeerNotFound
+		}
+		return nil, err
+	}
+	return decodeJSON[*apitype.WhoIsResponse](body)
+}
+
+// ErrPeerNotFound is returned by WhoIs and WhoIsNodeKey when a peer is not found.
+var ErrPeerNotFound = errors.New("peer not found")
+
+// WhoIsNodeKey returns the owner of the given wireguard public key.
+//
+// If not found, the error is ErrPeerNotFound.
+func (lc *LocalClient) WhoIsNodeKey(ctx context.Context, key key.NodePublic) (*apitype.WhoIsResponse, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/whois?addr="+url.QueryEscape(key.String()))
+	if err != nil {
+		if hs, ok := err.(httpStatusError); ok && hs.HTTPStatus == http.StatusNotFound {
+			return nil, ErrPeerNotFound
+		}
+		return nil, err
+	}
+	return decodeJSON[*apitype.WhoIsResponse](body)
+}
+
+// WhoIsProto returns the owner of the remoteAddr, which must be an IP or
+// IP:port, for the given protocol (tcp or udp).
+//
+// If not found, the error is ErrPeerNotFound.
+func (lc *LocalClient) WhoIsProto(ctx context.Context, proto, remoteAddr string) (*apitype.WhoIsResponse, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/whois?proto="+url.QueryEscape(proto)+"&addr="+url.QueryEscape(remoteAddr))
+	if err != nil {
+		if hs, ok := err.(httpStatusError); ok && hs.HTTPStatus == http.StatusNotFound {
+			return nil, ErrPeerNotFound
+		}
 		return nil, err
 	}
 	return decodeJSON[*apitype.WhoIsResponse](body)
@@ -692,6 +738,27 @@ func (lc *LocalClient) CheckUDPGROForwarding(ctx context.Context) error {
 	}
 	if err := json.Unmarshal(body, &jres); err != nil {
 		return fmt.Errorf("invalid JSON from check-udp-gro-forwarding: %w", err)
+	}
+	if jres.Warning != "" {
+		return errors.New(jres.Warning)
+	}
+	return nil
+}
+
+// SetUDPGROForwarding enables UDP GRO forwarding for the main interface of this
+// node. This can be done to improve performance of tailnet nodes acting as exit
+// nodes or subnet routers.
+// See https://tailscale.com/kb/1320/performance-best-practices#linux-optimizations-for-subnet-routers-and-exit-nodes
+func (lc *LocalClient) SetUDPGROForwarding(ctx context.Context) error {
+	body, err := lc.get200(ctx, "/localapi/v0/set-udp-gro-forwarding")
+	if err != nil {
+		return err
+	}
+	var jres struct {
+		Warning string
+	}
+	if err := json.Unmarshal(body, &jres); err != nil {
+		return fmt.Errorf("invalid JSON from set-udp-gro-forwarding: %w", err)
 	}
 	if jres.Warning != "" {
 		return errors.New(jres.Warning)

@@ -645,7 +645,7 @@ func (s *Server) start() (reterr error) {
 	s.localAPIServer = &http.Server{Handler: lah}
 	s.lb.ConfigureWebClient(s.localClient)
 	go func() {
-		if err := s.localAPIServer.Serve(lal); err != nil {
+		if err := s.localAPIServer.Serve(lal); err != nil && err != http.ErrServerClosed {
 			s.logf("localapi serve error: %v", err)
 		}
 	}()
@@ -959,6 +959,9 @@ func (s *Server) ListenTLS(network, addr string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !st.CurrentTailnet.MagicDNSEnabled {
+		return nil, errors.New("tsnet: you must enable MagicDNS in the DNS page of the admin panel to proceed. See https://tailscale.com/s/https")
+	}
 	if len(st.CertDomains) == 0 {
 		return nil, errors.New("tsnet: you must enable HTTPS in the admin panel to proceed. See https://tailscale.com/s/https")
 	}
@@ -1146,7 +1149,7 @@ func resolveListenAddr(network, addr string) (netip.AddrPort, error) {
 	return netip.AddrPortFrom(bindHostOrZero, uint16(port)), nil
 }
 
-func (s *Server) listen(network, addr string, lnOn listenOn) (*listener, error) {
+func (s *Server) listen(network, addr string, lnOn listenOn) (net.Listener, error) {
 	switch network {
 	case "", "tcp", "tcp4", "tcp6", "udp", "udp4", "udp6":
 	default:
